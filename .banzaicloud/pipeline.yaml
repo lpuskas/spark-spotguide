@@ -1,0 +1,136 @@
+cluster:
+  cloud: amazon
+  location: eu-central-1
+  name: puski-spark-spotguide
+  postHooks:
+    InstallLogging:
+      bucketName: puski-spark-logs
+      secretId: 41b1b7e43bdcf6cbc494c7518e199ea4ae8d2c3b52576bef802893e65dd9588f
+    InstallMonitoring:
+      enabled: true
+  properties:
+    pke:
+      cri:
+        runtime: containerd
+      kubernetes:
+        rbac:
+          enabled: true
+        version: 1.14.0
+      nodepools:
+      - autoscaling: false
+        name: master
+        provider: amazon
+        providerConfig:
+          autoScalingGroup:
+            instanceType: c5.large
+            launchConfigurationName: master
+            name: master
+            size:
+              desired: 1
+              max: 1
+              min: 1
+            spotPrice: ""
+            zones:
+            - eu-central-1a
+        roles:
+        - master
+      - autoscaling: true
+        name: pool1
+        provider: amazon
+        providerConfig:
+          autoScalingGroup:
+            instanceType: t2.medium
+            launchConfigurationName: pool1
+            name: pool1
+            size:
+              desired: 3
+              max: 4
+              min: 3
+            spotPrice: ""
+            zones:
+            - eu-central-1a
+        roles:
+        - worker
+  secretId: 41b1b7e43bdcf6cbc494c7518e199ea4ae8d2c3b52576bef802893e65dd9588f
+pipeline:
+  install_history_server_bucket_secrets:
+    action: InstallSecret
+    clusterSecret:
+      convertToPreferredFormat: true
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-hs-bucket'
+      namespace: default
+      sourceSecretName: puski-aws
+      spec: []
+    image: banzaicloud/ci-pipeline-client:0.11
+  install_history_server_auth_secrets:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-hs-auth'
+      namespace: default
+      sourceSecretName: historyserverpass
+      spec:
+      - name: htpasswd
+        source: htpasswd
+    image: banzaicloud/ci-pipeline-client:0.11
+  package_application:
+    image: lachlanevenson/k8s-helm:latest
+    commands:
+    - helm init -c
+    - helm package ./.banzaicloud/charts/spotguide-spark
+  deploy_application:
+    action: EnsureDeployment
+    deployment:
+      name: ./spotguide-spark-1.0.0.tgz
+      releaseName: '{{ .CICD_REPO_NAME }}'
+      values:
+        banzaicloud:
+          bucket:
+            storageAccountName: null
+          secret:
+            historyServer:
+              name: historyserverpass
+          spark:
+            executor:
+              num: "2"
+            image:
+              name: null
+              tag: v2.4.0.147
+            version: 2.4.0
+        historyServer:
+          enabled: true
+        spark:
+          monitoring:
+            enabled: true
+            jmxCollector: |
+              lowercaseOutputName: false
+              lowercaseOutputLabelNames: false
+              whitelistObjectNames: ["*:*"]
+            metricsProperties: |
+              # Enable Prometheus for all instances by class name
+              *.sink.prometheus.class=com.banzaicloud.spark.metrics.sink.PrometheusSink
+              # Prometheus pushgateway address
+              *.sink.prometheus.pushgateway-address=prometheus-pushgateway.pipeline-system:9091
+              *.sink.prometheus.pushgateway-enable-timestamp=true
+              *.sink.prometheus.enable-dropwizard-collector=true
+              *.sink.prometheus.enable-jmx-collector=false
+          spark-hs:
+            image:
+              tag: v2.4.0.147
+            ingress:
+              annotations:
+                ingress.kubernetes.io/ssl-redirect: "true"
+                kubernetes.io/ingress.class: traefik
+                traefik.frontend.rule.type: PathPrefixStrip
+                traefik.ingress.kubernetes.io/auth-secret: '{{ .CICD_REPO_NAME }}-hs-auth'
+                traefik.ingress.kubernetes.io/auth-type: basic
+              enabled: true
+              hosts:
+              - shs-{{ (printf "%s-%s" .CICD_REPO_NAME .CLUSTER_NAME) | sha1sum | trunc 10}}.{{.ORG_NAME}}.{{.DOMAIN_NAME}}
+            sparkEventLogStorage:
+              azureStorageAccountName: null
+              cloudProvider: amazon
+              logDirectory: puski-spark-spotguide
+              secretName: '{{ .CICD_REPO_NAME }}-hs-bucket'
+    image: banzaicloud/ci-pipeline-client:0.11

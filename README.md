@@ -1,1 +1,1 @@
-# Say hello to Spotguides!
+# spotguide-spark
